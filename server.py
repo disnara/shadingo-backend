@@ -36,6 +36,7 @@ KICK_REDIRECT_URI = os.environ.get('KICK_REDIRECT_URI', '')
 ADMIN_IDS = os.environ['ADMIN_DISCORD_IDS'].split(',')
 JWT_SECRET = os.environ['JWT_SECRET']
 RAINBET_API_KEY = os.environ['RAINBET_API_KEY']
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://shadingo.vercel.app')
 RAINBET_API_URL = "https://services.rainbet.com/v1/external/affiliates"
 PRIZES = {1: 125, 2: 55, 3: 35, 4: 20, 5: 15}
 
@@ -43,10 +44,15 @@ PRIZES = {1: 125, 2: 55, 3: 35, 4: 20, 5: 15}
 app = FastAPI(title="Shadingo Rewards API")
 api_router = APIRouter(prefix="/api")
 
-# CORS
+# CORS - Updated to allow specific origins with credentials
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://shadingo.vercel.app",
+        "https://shadingo-frontend.vercel.app",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -110,6 +116,18 @@ class GuessingCompetition(BaseModel):
     winner_discord_id: Optional[str] = None
     winner_guess: Optional[float] = None
 
+class KickUsernameRequest(BaseModel):
+    kick_username: str
+
+class StartCompetitionRequest(BaseModel):
+    hunt_id: str
+
+class EndCompetitionRequest(BaseModel):
+    final_balance: float
+
+class SubmitGuessRequest(BaseModel):
+    guess_amount: float
+
 # ============= AUTH HELPERS =============
 
 def create_jwt_token(user_data: dict) -> str:
@@ -150,7 +168,7 @@ async def require_admin(request: Request) -> dict:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
-# ============= LEADERBOARD (Original from your backend) =============
+# ============= LEADERBOARD =============
 
 def mask_username(username):
     if not username or len(username) <= 3:
@@ -246,8 +264,8 @@ async def discord_login():
 async def discord_callback(code: str, response: Response):
     """Handle Discord OAuth callback"""
     try:
-        async with httpx.AsyncClient() as client:
-            token_response = await client.post(
+        async with httpx.AsyncClient() as http_client:
+            token_response = await http_client.post(
                 "https://discord.com/api/oauth2/token",
                 data={
                     "client_id": DISCORD_CLIENT_ID,
@@ -264,7 +282,7 @@ async def discord_callback(code: str, response: Response):
             if not access_token:
                 raise HTTPException(status_code=400, detail="Failed to get access token")
             
-            user_response = await client.get(
+            user_response = await http_client.get(
                 "https://discord.com/api/users/@me",
                 headers={"Authorization": f"Bearer {access_token}"}
             )
@@ -301,8 +319,7 @@ async def discord_callback(code: str, response: Response):
             
             jwt_token = create_jwt_token(user_data)
             
-            frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'https://site-upgrade-102.preview.emergentagent.com').replace('/api', '')
-            redirect_response = RedirectResponse(url=f"{frontend_url}/?login=success")
+            redirect_response = RedirectResponse(url=f"{FRONTEND_URL}/?login=success")
             redirect_response.set_cookie(
                 key="auth_token",
                 value=jwt_token,
@@ -333,9 +350,6 @@ async def logout(response: Response):
 
 # ============= KICK MANUAL =============
 
-class KickUsernameRequest(BaseModel):
-    kick_username: str
-
 @api_router.post("/auth/kick/manual")
 async def kick_manual(req: KickUsernameRequest, request: Request):
     """Manually set Kick username"""
@@ -344,7 +358,6 @@ async def kick_manual(req: KickUsernameRequest, request: Request):
     if not req.kick_username or len(req.kick_username) < 3:
         raise HTTPException(status_code=400, detail="Invalid Kick username")
     
-    # Update user with Kick username
     await db.users.update_one(
         {"user_id": user["user_id"]},
         {"$set": {"kick_username": req.kick_username, "kick_verified": True}}
@@ -364,7 +377,6 @@ async def kick_login(request: Request):
     
     state = f"{user['user_id']}:{uuid.uuid4()}"
     
-    # Kick uses standard OAuth2 but may require specific scopes
     kick_auth_url = (
         f"https://kick.com/oauth2/authorize?"
         f"client_id={KICK_CLIENT_ID}&"
@@ -378,21 +390,18 @@ async def kick_login(request: Request):
 @api_router.get("/auth/kick/callback")
 async def kick_callback(code: str = None, state: str = None, error: str = None):
     """Handle Kick OAuth callback"""
-    frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'https://site-upgrade-102.preview.emergentagent.com').replace('/api', '')
-    
     if error:
         logger.error(f"Kick OAuth error from provider: {error}")
-        return RedirectResponse(url=f"{frontend_url}/account-settings?kick=error&reason={error}")
+        return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason={error}")
     
     if not code or not state:
-        return RedirectResponse(url=f"{frontend_url}/account-settings?kick=error&reason=missing_code")
+        return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=missing_code")
     
     try:
         user_id = state.split(':')[0]
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Exchange code for token
-            token_response = await client.post(
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            token_response = await http_client.post(
                 "https://kick.com/oauth2/token",
                 data={
                     "client_id": KICK_CLIENT_ID,
@@ -404,11 +413,8 @@ async def kick_callback(code: str = None, state: str = None, error: str = None):
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             
-            logger.info(f"Kick token response status: {token_response.status_code}")
-            logger.info(f"Kick token response: {token_response.text}")
-            
             if token_response.status_code != 200:
-                raise HTTPException(status_code=400, detail=f"Kick token exchange failed: {token_response.text}")
+                raise HTTPException(status_code=400, detail=f"Kick token exchange failed")
             
             token_data = token_response.json()
             access_token = token_data.get("access_token")
@@ -416,13 +422,10 @@ async def kick_callback(code: str = None, state: str = None, error: str = None):
             if not access_token:
                 raise HTTPException(status_code=400, detail="No access token in response")
             
-            # Try different user endpoints
-            user_response = None
             kick_username = None
             
-            # Try endpoint 1
             try:
-                user_response = await client.get(
+                user_response = await http_client.get(
                     "https://kick.com/api/v2/user",
                     headers={"Authorization": f"Bearer {access_token}"}
                 )
@@ -432,10 +435,9 @@ async def kick_callback(code: str = None, state: str = None, error: str = None):
             except:
                 pass
             
-            # Try endpoint 2 if first failed
             if not kick_username:
                 try:
-                    user_response = await client.get(
+                    user_response = await http_client.get(
                         "https://api.kick.com/public/v1/user",
                         headers={"Authorization": f"Bearer {access_token}"}
                     )
@@ -453,11 +455,11 @@ async def kick_callback(code: str = None, state: str = None, error: str = None):
                 {"$set": {"kick_username": kick_username, "kick_verified": True}}
             )
             
-            return RedirectResponse(url=f"{frontend_url}/account-settings?kick=success")
+            return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=success")
             
     except Exception as e:
         logger.error(f"Kick OAuth error: {str(e)}")
-        return RedirectResponse(url=f"{frontend_url}/account-settings?kick=error&reason=server_error")
+        return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=server_error")
 
 # ============= BONUS HUNTS =============
 
@@ -527,9 +529,6 @@ async def get_active_competition():
     competition = await db.guessing_competitions.find_one({"status": "active"}, {"_id": 0})
     return competition
 
-class StartCompetitionRequest(BaseModel):
-    hunt_id: str
-
 @api_router.post("/competitions/start")
 async def start_competition(req: StartCompetitionRequest, request: Request):
     """Start a guessing competition (admin only)"""
@@ -549,9 +548,6 @@ async def start_competition(req: StartCompetitionRequest, request: Request):
     
     await db.guessing_competitions.insert_one(comp_dict)
     return competition
-
-class EndCompetitionRequest(BaseModel):
-    final_balance: float
 
 @api_router.post("/competitions/{competition_id}/end")
 async def end_competition(competition_id: str, req: EndCompetitionRequest, request: Request):
@@ -591,9 +587,6 @@ async def end_competition(competition_id: str, req: EndCompetitionRequest, reque
     )
     
     return {"message": "Competition ended", "winner": winner, "final_balance": req.final_balance}
-
-class SubmitGuessRequest(BaseModel):
-    guess_amount: float
 
 @api_router.post("/guesses")
 async def submit_guess(req: SubmitGuessRequest, request: Request):
