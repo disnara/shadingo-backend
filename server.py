@@ -12,7 +12,7 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 import uuid
-import jwt
+from jose import jwt
 import requests
 import logging
 
@@ -20,19 +20,20 @@ import logging
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# MongoDB connection - use .get() for safer access
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+db_name = os.environ.get('DB_NAME', 'shadingo_database')
 client = MongoClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[db_name]
 
 # Configuration
-DISCORD_CLIENT_ID = os.environ['DISCORD_CLIENT_ID']
-DISCORD_CLIENT_SECRET = os.environ['DISCORD_CLIENT_SECRET']
-DISCORD_REDIRECT_URI = os.environ['DISCORD_REDIRECT_URI']
+DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
+DISCORD_CLIENT_SECRET = os.environ.get('DISCORD_CLIENT_SECRET', '')
+DISCORD_REDIRECT_URI = os.environ.get('DISCORD_REDIRECT_URI', '')
 KICK_CLIENT_ID = os.environ.get('KICK_CLIENT_ID', '')
 KICK_CLIENT_SECRET = os.environ.get('KICK_CLIENT_SECRET', '')
 KICK_REDIRECT_URI = os.environ.get('KICK_REDIRECT_URI', '')
-ADMIN_IDS = os.environ['ADMIN_DISCORD_IDS'].split(',')
+ADMIN_IDS = os.environ.get('ADMIN_DISCORD_IDS', '').split(',')
 JWT_SECRET = os.environ['JWT_SECRET']
 RAINBET_API_KEY = os.environ['RAINBET_API_KEY']
 RAINBET_API_URL = "https://services.rainbet.com/v1/external/affiliates"
@@ -695,5 +696,7 @@ app.include_router(api_router)
 def shutdown_db_client():
     client.close()
 
+# For local development only
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
