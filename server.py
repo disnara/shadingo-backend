@@ -37,18 +37,26 @@ KICK_REDIRECT_URI = os.environ.get('KICK_REDIRECT_URI', '')
 ADMIN_IDS = os.environ.get('ADMIN_DISCORD_IDS', '').split(',')
 JWT_SECRET = os.environ.get('JWT_SECRET', 'default_secret')
 RAINBET_API_KEY = os.environ.get('RAINBET_API_KEY', '')
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://shadingo.vercel.app')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://traffedlane.xyz')
 RAINBET_API_URL = "https://services.rainbet.com/v1/external/affiliates"
 PRIZES = {1: 125, 2: 55, 3: 35, 4: 20, 5: 15}
+
+# Allowed origins for CORS
+ALLOWED_ORIGINS = [
+    "https://traffedlane.xyz",
+    "https://www.traffedlane.xyz",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
 # FastAPI app
 app = FastAPI(title="Shadingo Rewards API")
 api_router = APIRouter(prefix="/api")
 
-# CORS
+# CORS - specific origins for credentials
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -103,7 +111,6 @@ def decode_jwt_unsafe(token: str) -> Optional[dict]:
         if len(parts) != 3:
             return None
         payload = parts[1]
-        # Add padding if needed
         padding = 4 - len(payload) % 4
         if padding != 4:
             payload += '=' * padding
@@ -306,7 +313,8 @@ def discord_callback(code: str):
                 httponly=True,
                 secure=True,
                 samesite="none",
-                max_age=30*24*60*60
+                max_age=30*24*60*60,
+                domain=None  # Allow cookie to be set for any domain
             )
             return redirect_response
             
@@ -322,7 +330,7 @@ def get_me(request: Request):
 
 @api_router.post("/auth/logout")
 def logout(response: Response):
-    response.delete_cookie("auth_token")
+    response.delete_cookie("auth_token", samesite="none", secure=True)
     return {"message": "Logged out successfully"}
 
 # ============= KICK OAUTH WITH PKCE =============
@@ -355,7 +363,6 @@ def kick_login(request: Request):
         "created_at": datetime.now(timezone.utc).isoformat()
     })
     
-    # Request openid scope to get id_token with user info
     kick_auth_url = (
         f"https://id.kick.com/oauth/authorize?"
         f"client_id={KICK_CLIENT_ID}&"
@@ -411,25 +418,25 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
             
             kick_username = None
             
-            # Method 1: Decode id_token if present (contains user info)
+            # Method 1: Decode id_token if present
             if id_token:
                 id_claims = decode_jwt_unsafe(id_token)
                 if id_claims:
                     kick_username = id_claims.get("preferred_username") or id_claims.get("username") or id_claims.get("name") or id_claims.get("sub")
             
-            # Method 2: Decode access_token (might be JWT with user info)
+            # Method 2: Decode access_token
             if not kick_username:
                 access_claims = decode_jwt_unsafe(access_token)
                 if access_claims:
                     kick_username = access_claims.get("preferred_username") or access_claims.get("username") or access_claims.get("name") or access_claims.get("sub")
             
-            # Method 3: Check token response for user info
+            # Method 3: Check token response
             if not kick_username:
                 kick_username = token_data.get("username") or token_data.get("name")
                 if isinstance(token_data.get("user"), dict):
                     kick_username = token_data["user"].get("username") or token_data["user"].get("name")
             
-            # Method 4: Try userinfo endpoint (OpenID Connect)
+            # Method 4: Try userinfo endpoint
             if not kick_username:
                 try:
                     userinfo_response = http_client.get(
@@ -442,58 +449,28 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
                 except:
                     pass
             
-            # Method 5: Try the CORRECT Kick API endpoint - https://api.kick.com/public/v1/users
-            api_response_data = None
+            # Method 5: Try Kick API endpoint
             if not kick_username:
                 try:
                     user_response = http_client.get(
                         "https://api.kick.com/public/v1/users",
                         headers={"Authorization": f"Bearer {access_token}"}
                     )
-                    api_response_data = {"status": user_response.status_code, "body": user_response.text[:500]}
                     if user_response.status_code == 200:
                         kick_data = user_response.json()
-                        # Response format: {"data": [{"user_id": ..., "name": "username", ...}], "message": "OK"}
                         if isinstance(kick_data, dict) and "data" in kick_data:
                             data_list = kick_data["data"]
                             if isinstance(data_list, list) and len(data_list) > 0:
                                 kick_user = data_list[0]
                                 kick_username = kick_user.get("name") or kick_user.get("username") or kick_user.get("slug")
-                        elif isinstance(kick_data, dict):
-                            kick_username = kick_data.get("name") or kick_data.get("username")
-                        elif isinstance(kick_data, list) and len(kick_data) > 0:
-                            kick_username = kick_data[0].get("name") or kick_data[0].get("username")
-                except Exception as e:
-                    api_response_data = {"error": str(e)}
-            
-            # Method 6: Try alternate endpoints
-            if not kick_username:
-                for endpoint in [
-                    "https://kick.com/api/v1/user",
-                    "https://kick.com/api/v2/user", 
-                    "https://api.kick.com/api/v1/user",
-                    "https://api.kick.com/api/v2/user",
-                ]:
-                    try:
-                        user_response = http_client.get(
-                            endpoint,
-                            headers={"Authorization": f"Bearer {access_token}"}
-                        )
-                        if user_response.status_code == 200:
-                            kick_user = user_response.json()
-                            kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
-                            if kick_username:
-                                break
-                    except:
-                        pass
+                except:
+                    pass
             
             if not kick_username:
-                # Store debug info for troubleshooting
                 db.kick_debug.insert_one({
                     "user_id": user_id,
                     "token_data_keys": list(token_data.keys()),
                     "has_id_token": id_token is not None,
-                    "api_response": api_response_data,
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_username")
@@ -527,6 +504,8 @@ def create_hunt(hunt: BonusHuntModel, request: Request):
     require_admin(request)
     hunt_dict = hunt.model_dump()
     db.bonus_hunts.insert_one(hunt_dict)
+    # Return without _id
+    del hunt_dict["_id"] if "_id" in hunt_dict else None
     return hunt_dict
 
 @api_router.put("/hunts/{hunt_id}")
@@ -577,6 +556,7 @@ def start_competition(req: StartCompetitionRequest, request: Request):
         "winner_guess": None
     }
     db.guessing_competitions.insert_one(competition)
+    del competition["_id"] if "_id" in competition else None
     return competition
 
 @api_router.post("/competitions/{competition_id}/end")
@@ -633,6 +613,7 @@ def submit_guess(req: SubmitGuessRequest, request: Request):
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
     db.guesses.insert_one(guess)
+    del guess["_id"] if "_id" in guess else None
     return guess
 
 @api_router.get("/guesses/hunt/{hunt_id}")
@@ -672,7 +653,6 @@ def get_stats(request: Request):
         "total_guesses": db.guesses.count_documents({})
     }
 
-# Debug endpoint to check kick oauth issues
 @api_router.get("/admin/kick-debug")
 def get_kick_debug(request: Request):
     require_admin(request)
