@@ -14,6 +14,9 @@ from datetime import datetime, timezone, timedelta
 import uuid
 import jwt
 import httpx
+import hashlib
+import base64
+import secrets
 
 # Load environment variables
 ROOT_DIR = Path(__file__).parent
@@ -83,6 +86,17 @@ class BonusHuntModel(BaseModel):
     collected_count: int = 0
     best_win: float = 0.0
     run_avg_x: float = 0.0
+
+# ============= PKCE HELPERS =============
+
+def generate_code_verifier() -> str:
+    """Generate a random code verifier for PKCE"""
+    return secrets.token_urlsafe(64)[:128]
+
+def generate_code_challenge(code_verifier: str) -> str:
+    """Generate code challenge from verifier using S256 method"""
+    digest = hashlib.sha256(code_verifier.encode('ascii')).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')
 
 # ============= AUTH HELPERS =============
 
@@ -297,7 +311,7 @@ def logout(response: Response):
     response.delete_cookie("auth_token")
     return {"message": "Logged out successfully"}
 
-# ============= KICK =============
+# ============= KICK OAUTH WITH PKCE =============
 
 @api_router.post("/auth/kick/manual")
 def kick_manual(req: KickUsernameRequest, request: Request):
@@ -315,14 +329,30 @@ def kick_login(request: Request):
     user = require_auth(request)
     if not KICK_CLIENT_ID:
         raise HTTPException(status_code=501, detail="Kick OAuth not configured")
-    state = f"{user['user_id']}:{uuid.uuid4()}"
+    
+    # Generate PKCE code verifier and challenge
+    code_verifier = generate_code_verifier()
+    code_challenge = generate_code_challenge(code_verifier)
+    
+    # Store code_verifier in database for later use
+    state = str(uuid.uuid4())
+    db.oauth_states.insert_one({
+        "state": state,
+        "user_id": user["user_id"],
+        "code_verifier": code_verifier,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    # Build Kick OAuth URL with PKCE
     kick_auth_url = (
-        f"https://kick.com/oauth2/authorize?"
+        f"https://id.kick.com/oauth/authorize?"
         f"client_id={KICK_CLIENT_ID}&"
         f"redirect_uri={urllib.parse.quote(KICK_REDIRECT_URI)}&"
         f"response_type=code&"
         f"scope=user:read&"
-        f"state={state}"
+        f"state={state}&"
+        f"code_challenge={code_challenge}&"
+        f"code_challenge_method=S256"
     )
     return RedirectResponse(kick_auth_url)
 
@@ -332,47 +362,85 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
         return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason={error}")
     if not code or not state:
         return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=missing_code")
+    
     try:
-        user_id = state.split(':')[0]
+        # Retrieve stored state and code_verifier
+        oauth_state = db.oauth_states.find_one({"state": state})
+        if not oauth_state:
+            return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=invalid_state")
+        
+        user_id = oauth_state["user_id"]
+        code_verifier = oauth_state["code_verifier"]
+        
+        # Clean up used state
+        db.oauth_states.delete_one({"state": state})
+        
         with httpx.Client(timeout=30.0) as http_client:
+            # Exchange code for token with PKCE
             token_response = http_client.post(
-                "https://kick.com/oauth2/token",
+                "https://id.kick.com/oauth/token",
                 data={
                     "client_id": KICK_CLIENT_ID,
                     "client_secret": KICK_CLIENT_SECRET,
                     "grant_type": "authorization_code",
                     "code": code,
                     "redirect_uri": KICK_REDIRECT_URI,
+                    "code_verifier": code_verifier,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
+            
             if token_response.status_code != 200:
-                raise Exception("Token exchange failed")
+                return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=token_failed")
+            
             token_data = token_response.json()
             access_token = token_data.get("access_token")
-            if not access_token:
-                raise Exception("No access token")
             
+            if not access_token:
+                return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_token")
+            
+            # Get user info from Kick
             kick_username = None
+            
+            # Try the public API endpoint
             try:
                 user_response = http_client.get(
-                    "https://kick.com/api/v2/user",
+                    "https://api.kick.com/public/v1/users",
                     headers={"Authorization": f"Bearer {access_token}"}
                 )
                 if user_response.status_code == 200:
                     kick_user = user_response.json()
-                    kick_username = kick_user.get("username") or kick_user.get("name")
+                    if isinstance(kick_user, dict):
+                        kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
+                    elif isinstance(kick_user, list) and len(kick_user) > 0:
+                        kick_username = kick_user[0].get("username") or kick_user[0].get("name")
             except:
                 pass
             
+            # Try alternate endpoint if first failed
             if not kick_username:
-                raise Exception("Could not fetch Kick username")
+                try:
+                    user_response = http_client.get(
+                        "https://api.kick.com/public/v1/user",
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    if user_response.status_code == 200:
+                        kick_user = user_response.json()
+                        kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
+                except:
+                    pass
             
+            if not kick_username:
+                return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_username")
+            
+            # Update user with Kick username
             db.users.update_one(
                 {"user_id": user_id},
                 {"$set": {"kick_username": kick_username, "kick_verified": True}}
             )
+            
             return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=success")
+            
     except Exception as e:
         return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=server_error")
 
