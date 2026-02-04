@@ -90,13 +90,27 @@ class BonusHuntModel(BaseModel):
 # ============= PKCE HELPERS =============
 
 def generate_code_verifier() -> str:
-    """Generate a random code verifier for PKCE"""
     return secrets.token_urlsafe(64)[:128]
 
 def generate_code_challenge(code_verifier: str) -> str:
-    """Generate code challenge from verifier using S256 method"""
     digest = hashlib.sha256(code_verifier.encode('ascii')).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')
+
+def decode_jwt_unsafe(token: str) -> Optional[dict]:
+    """Decode JWT without verification to extract claims"""
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            return None
+        payload = parts[1]
+        # Add padding if needed
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += '=' * padding
+        decoded = base64.urlsafe_b64decode(payload)
+        return json.loads(decoded)
+    except:
+        return None
 
 # ============= AUTH HELPERS =============
 
@@ -330,11 +344,9 @@ def kick_login(request: Request):
     if not KICK_CLIENT_ID:
         raise HTTPException(status_code=501, detail="Kick OAuth not configured")
     
-    # Generate PKCE code verifier and challenge
     code_verifier = generate_code_verifier()
     code_challenge = generate_code_challenge(code_verifier)
     
-    # Store code_verifier in database for later use
     state = str(uuid.uuid4())
     db.oauth_states.insert_one({
         "state": state,
@@ -343,13 +355,13 @@ def kick_login(request: Request):
         "created_at": datetime.now(timezone.utc).isoformat()
     })
     
-    # Build Kick OAuth URL with PKCE
+    # Request openid scope to get id_token with user info
     kick_auth_url = (
         f"https://id.kick.com/oauth/authorize?"
         f"client_id={KICK_CLIENT_ID}&"
         f"redirect_uri={urllib.parse.quote(KICK_REDIRECT_URI)}&"
         f"response_type=code&"
-        f"scope=user:read&"
+        f"scope=user:read+openid&"
         f"state={state}&"
         f"code_challenge={code_challenge}&"
         f"code_challenge_method=S256"
@@ -364,7 +376,6 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
         return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=missing_code")
     
     try:
-        # Retrieve stored state and code_verifier
         oauth_state = db.oauth_states.find_one({"state": state})
         if not oauth_state:
             return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=invalid_state")
@@ -372,11 +383,9 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
         user_id = oauth_state["user_id"]
         code_verifier = oauth_state["code_verifier"]
         
-        # Clean up used state
         db.oauth_states.delete_one({"state": state})
         
         with httpx.Client(timeout=30.0) as http_client:
-            # Exchange code for token with PKCE
             token_response = http_client.post(
                 "https://id.kick.com/oauth/token",
                 data={
@@ -395,77 +404,74 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
             
             token_data = token_response.json()
             access_token = token_data.get("access_token")
+            id_token = token_data.get("id_token")
             
             if not access_token:
                 return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_token")
             
-            # Get user info from Kick - try multiple endpoints
             kick_username = None
             
-            # Method 1: Try api/v1/user (most common)
-            try:
-                user_response = http_client.get(
+            # Method 1: Decode id_token if present (contains user info)
+            if id_token:
+                id_claims = decode_jwt_unsafe(id_token)
+                if id_claims:
+                    kick_username = id_claims.get("preferred_username") or id_claims.get("username") or id_claims.get("name") or id_claims.get("sub")
+            
+            # Method 2: Decode access_token (might be JWT with user info)
+            if not kick_username:
+                access_claims = decode_jwt_unsafe(access_token)
+                if access_claims:
+                    kick_username = access_claims.get("preferred_username") or access_claims.get("username") or access_claims.get("name") or access_claims.get("sub")
+            
+            # Method 3: Check token response for user info
+            if not kick_username:
+                kick_username = token_data.get("username") or token_data.get("name")
+                if isinstance(token_data.get("user"), dict):
+                    kick_username = token_data["user"].get("username") or token_data["user"].get("name")
+            
+            # Method 4: Try userinfo endpoint (OpenID Connect)
+            if not kick_username:
+                try:
+                    userinfo_response = http_client.get(
+                        "https://id.kick.com/oauth/userinfo",
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    if userinfo_response.status_code == 200:
+                        userinfo = userinfo_response.json()
+                        kick_username = userinfo.get("preferred_username") or userinfo.get("username") or userinfo.get("name") or userinfo.get("sub")
+                except:
+                    pass
+            
+            # Method 5: Try Kick API endpoints
+            if not kick_username:
+                for endpoint in [
+                    "https://kick.com/api/v1/user",
+                    "https://kick.com/api/v2/user",
                     "https://api.kick.com/api/v1/user",
-                    headers={"Authorization": f"Bearer {access_token}"}
-                )
-                if user_response.status_code == 200:
-                    kick_user = user_response.json()
-                    kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
-            except:
-                pass
-            
-            # Method 2: Try kick.com/api/v1/user
-            if not kick_username:
-                try:
-                    user_response = http_client.get(
-                        "https://kick.com/api/v1/user",
-                        headers={"Authorization": f"Bearer {access_token}"}
-                    )
-                    if user_response.status_code == 200:
-                        kick_user = user_response.json()
-                        kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
-                except:
-                    pass
-            
-            # Method 3: Try api/v2/user
-            if not kick_username:
-                try:
-                    user_response = http_client.get(
-                        "https://api.kick.com/api/v2/user",
-                        headers={"Authorization": f"Bearer {access_token}"}
-                    )
-                    if user_response.status_code == 200:
-                        kick_user = user_response.json()
-                        kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
-                except:
-                    pass
-            
-            # Method 4: Introspect the token to get user info
-            if not kick_username:
-                try:
-                    introspect_response = http_client.post(
-                        "https://id.kick.com/oauth/introspect",
-                        data={
-                            "token": access_token,
-                            "client_id": KICK_CLIENT_ID,
-                            "client_secret": KICK_CLIENT_SECRET,
-                        },
-                        headers={"Content-Type": "application/x-www-form-urlencoded"}
-                    )
-                    if introspect_response.status_code == 200:
-                        introspect_data = introspect_response.json()
-                        kick_username = introspect_data.get("username") or introspect_data.get("sub") or introspect_data.get("name")
-                except:
-                    pass
-            
-            # Method 5: Check if token response itself contains user info
-            if not kick_username:
-                kick_username = token_data.get("username") or (token_data.get("user", {}).get("username") if isinstance(token_data.get("user"), dict) else None)
+                ]:
+                    try:
+                        user_response = http_client.get(
+                            endpoint,
+                            headers={"Authorization": f"Bearer {access_token}"}
+                        )
+                        if user_response.status_code == 200:
+                            kick_user = user_response.json()
+                            kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
+                            if kick_username:
+                                break
+                    except:
+                        pass
             
             if not kick_username:
+                # Store debug info for troubleshooting
+                db.kick_debug.insert_one({
+                    "user_id": user_id,
+                    "token_data_keys": list(token_data.keys()),
+                    "has_id_token": id_token is not None,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
                 return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_username")
             
-            # Update user with Kick username
             db.users.update_one(
                 {"user_id": user_id},
                 {"$set": {"kick_username": kick_username, "kick_verified": True}}
@@ -639,6 +645,13 @@ def get_stats(request: Request):
         "total_hunts": db.bonus_hunts.count_documents({}),
         "total_guesses": db.guesses.count_documents({})
     }
+
+# Debug endpoint to check kick oauth issues
+@api_router.get("/admin/kick-debug")
+def get_kick_debug(request: Request):
+    require_admin(request)
+    debug_logs = list(db.kick_debug.find({}, {"_id": 0}).sort("timestamp", -1).limit(10))
+    return debug_logs
 
 # Include router
 app.include_router(api_router)
