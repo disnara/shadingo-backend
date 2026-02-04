@@ -442,12 +442,32 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
                 except:
                     pass
             
-            # Method 5: Try Kick API endpoints
+            # Method 5: Try the CORRECT Kick API endpoint - https://api.kick.com/public/v1/users
+            api_response_data = None
+            if not kick_username:
+                try:
+                    user_response = http_client.get(
+                        "https://api.kick.com/public/v1/users",
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    api_response_data = {"status": user_response.status_code, "body": user_response.text[:500]}
+                    if user_response.status_code == 200:
+                        kick_user = user_response.json()
+                        # Handle if response is a list or dict
+                        if isinstance(kick_user, list) and len(kick_user) > 0:
+                            kick_user = kick_user[0]
+                        if isinstance(kick_user, dict):
+                            kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug") or kick_user.get("user_id")
+                except Exception as e:
+                    api_response_data = {"error": str(e)}
+            
+            # Method 6: Try alternate endpoints
             if not kick_username:
                 for endpoint in [
                     "https://kick.com/api/v1/user",
-                    "https://kick.com/api/v2/user",
+                    "https://kick.com/api/v2/user", 
                     "https://api.kick.com/api/v1/user",
+                    "https://api.kick.com/api/v2/user",
                 ]:
                     try:
                         user_response = http_client.get(
@@ -468,6 +488,7 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
                     "user_id": user_id,
                     "token_data_keys": list(token_data.keys()),
                     "has_id_token": id_token is not None,
+                    "api_response": api_response_data,
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_username")
