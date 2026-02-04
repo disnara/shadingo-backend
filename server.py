@@ -505,7 +505,7 @@ def create_hunt(hunt: BonusHuntModel, request: Request):
     hunt_dict = hunt.model_dump()
     db.bonus_hunts.insert_one(hunt_dict)
     # Return without _id
-    del hunt_dict["_id"] if "_id" in hunt_dict else None
+    hunt_dict.pop("_id", None)
     return hunt_dict
 
 @api_router.put("/hunts/{hunt_id}")
@@ -556,7 +556,7 @@ def start_competition(req: StartCompetitionRequest, request: Request):
         "winner_guess": None
     }
     db.guessing_competitions.insert_one(competition)
-    del competition["_id"] if "_id" in competition else None
+    competition.pop("_id", None)
     return competition
 
 @api_router.post("/competitions/{competition_id}/end")
@@ -613,7 +613,7 @@ def submit_guess(req: SubmitGuessRequest, request: Request):
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
     db.guesses.insert_one(guess)
-    del guess["_id"] if "_id" in guess else None
+    guess.pop("_id", None)
     return guess
 
 @api_router.get("/guesses/hunt/{hunt_id}")
