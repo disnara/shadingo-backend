@@ -452,12 +452,17 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
                     )
                     api_response_data = {"status": user_response.status_code, "body": user_response.text[:500]}
                     if user_response.status_code == 200:
-                        kick_user = user_response.json()
-                        # Handle if response is a list or dict
-                        if isinstance(kick_user, list) and len(kick_user) > 0:
-                            kick_user = kick_user[0]
-                        if isinstance(kick_user, dict):
-                            kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug") or kick_user.get("user_id")
+                        kick_data = user_response.json()
+                        # Response format: {"data": [{"user_id": ..., "name": "username", ...}], "message": "OK"}
+                        if isinstance(kick_data, dict) and "data" in kick_data:
+                            data_list = kick_data["data"]
+                            if isinstance(data_list, list) and len(data_list) > 0:
+                                kick_user = data_list[0]
+                                kick_username = kick_user.get("name") or kick_user.get("username") or kick_user.get("slug")
+                        elif isinstance(kick_data, dict):
+                            kick_username = kick_data.get("name") or kick_data.get("username")
+                        elif isinstance(kick_data, list) and len(kick_data) > 0:
+                            kick_username = kick_data[0].get("name") or kick_data[0].get("username")
                 except Exception as e:
                     api_response_data = {"error": str(e)}
             
