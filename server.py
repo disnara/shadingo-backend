@@ -399,29 +399,26 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
             if not access_token:
                 return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_token")
             
-            # Get user info from Kick
+            # Get user info from Kick - try multiple endpoints
             kick_username = None
             
-            # Try the public API endpoint
+            # Method 1: Try api/v1/user (most common)
             try:
                 user_response = http_client.get(
-                    "https://api.kick.com/public/v1/users",
+                    "https://api.kick.com/api/v1/user",
                     headers={"Authorization": f"Bearer {access_token}"}
                 )
                 if user_response.status_code == 200:
                     kick_user = user_response.json()
-                    if isinstance(kick_user, dict):
-                        kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
-                    elif isinstance(kick_user, list) and len(kick_user) > 0:
-                        kick_username = kick_user[0].get("username") or kick_user[0].get("name")
+                    kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
             except:
                 pass
             
-            # Try alternate endpoint if first failed
+            # Method 2: Try kick.com/api/v1/user
             if not kick_username:
                 try:
                     user_response = http_client.get(
-                        "https://api.kick.com/public/v1/user",
+                        "https://kick.com/api/v1/user",
                         headers={"Authorization": f"Bearer {access_token}"}
                     )
                     if user_response.status_code == 200:
@@ -429,6 +426,41 @@ def kick_callback(code: str = None, state: str = None, error: str = None):
                         kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
                 except:
                     pass
+            
+            # Method 3: Try api/v2/user
+            if not kick_username:
+                try:
+                    user_response = http_client.get(
+                        "https://api.kick.com/api/v2/user",
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    if user_response.status_code == 200:
+                        kick_user = user_response.json()
+                        kick_username = kick_user.get("username") or kick_user.get("name") or kick_user.get("slug")
+                except:
+                    pass
+            
+            # Method 4: Introspect the token to get user info
+            if not kick_username:
+                try:
+                    introspect_response = http_client.post(
+                        "https://id.kick.com/oauth/introspect",
+                        data={
+                            "token": access_token,
+                            "client_id": KICK_CLIENT_ID,
+                            "client_secret": KICK_CLIENT_SECRET,
+                        },
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}
+                    )
+                    if introspect_response.status_code == 200:
+                        introspect_data = introspect_response.json()
+                        kick_username = introspect_data.get("username") or introspect_data.get("sub") or introspect_data.get("name")
+                except:
+                    pass
+            
+            # Method 5: Check if token response itself contains user info
+            if not kick_username:
+                kick_username = token_data.get("username") or (token_data.get("user", {}).get("username") if isinstance(token_data.get("user"), dict) else None)
             
             if not kick_username:
                 return RedirectResponse(url=f"{FRONTEND_URL}/account-settings?kick=error&reason=no_username")
