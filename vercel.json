@@ -1,7 +1,3 @@
 {
-  "functions": {
-    "api/*.py": {
-      "runtime": "python3.9"
-    }
-  }
+  "version": 2
 }
