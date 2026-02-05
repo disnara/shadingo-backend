@@ -166,13 +166,14 @@ def mask_username(username):
         return username[0] + "*" * (len(username) - 2) + username[-1]
     return username[:2] + "*" * (len(username) - 3) + username[-1]
 
-def get_biweekly_period():
+def get_weekly_period():
+    """Get current weekly period (7 days)"""
     reference_date = datetime(2025, 1, 1, tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     days_since_ref = (now - reference_date).days
-    period_number = days_since_ref // 14
-    period_start = reference_date + timedelta(days=period_number * 14)
-    period_end = period_start + timedelta(days=13)
+    period_number = days_since_ref // 7
+    period_start = reference_date + timedelta(days=period_number * 7)
+    period_end = period_start + timedelta(days=6)
     return period_start, period_end
 
 def get_time_remaining(period_end):
@@ -192,7 +193,7 @@ def root():
 
 @api_router.get("/leaderboard")
 def leaderboard():
-    period_start, period_end = get_biweekly_period()
+    period_start, period_end = get_weekly_period()
     try:
         params = urllib.parse.urlencode({
             "start_at": period_start.strftime("%Y-%m-%d"),
