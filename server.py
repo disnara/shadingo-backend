@@ -609,11 +609,8 @@ class SubmitGuessRequest(BaseModel):
 
 @api_router.post("/guesses")
 def submit_guess(req: SubmitGuessRequest, request: Request):
-    """Submit a guess (requires Kick account)"""
+    """Submit a guess (requires Discord login only)"""
     user = require_auth(request)
-    
-    if not user.get("kick_verified"):
-        raise HTTPException(status_code=400, detail="You must connect your Kick account to submit a guess")
     
     competition = db.guessing_competitions.find_one({"status": "active"})
     if not competition:
@@ -630,12 +627,13 @@ def submit_guess(req: SubmitGuessRequest, request: Request):
     guess = Guess(
         hunt_id=competition["hunt_id"],
         user_discord_id=user["discord_id"],
-        kick_username=user["kick_username"],
+        kick_username=user.get("discord_username", "Unknown"),
         guess_amount=req.guess_amount
     )
     
     guess_dict = guess.model_dump()
     guess_dict["timestamp"] = guess_dict["timestamp"].isoformat()
+    guess_dict["discord_username"] = user.get("discord_username", "Unknown")
     
     db.guesses.insert_one(guess_dict)
     return guess
@@ -664,12 +662,19 @@ def search_users(q: str = "", request: Request = None):
     if q:
         query = {
             "$or": [
-                {"discord_username": {"$regex": q, "$options": "i"}},
-                {"kick_username": {"$regex": q, "$options": "i"}}
+                {"discord_username": {"$regex": q, "$options": "i"}}
             ]
         }
     
     users = list(db.users.find(query, {"_id": 0}).limit(50))
+    return users
+
+@api_router.get("/admin/users/all")
+def get_all_users(request: Request):
+    """Get all users sorted by join date (admin only)"""
+    require_admin(request)
+    
+    users = list(db.users.find({}, {"_id": 0}).sort("created_at", -1))
     return users
 
 @api_router.get("/admin/stats")
@@ -678,13 +683,11 @@ def get_stats(request: Request):
     require_admin(request)
     
     total_users = db.users.count_documents({})
-    verified_users = db.users.count_documents({"kick_verified": True})
     total_hunts = db.bonus_hunts.count_documents({})
     total_guesses = db.guesses.count_documents({})
     
     return {
         "total_users": total_users,
-        "verified_users": verified_users,
         "total_hunts": total_hunts,
         "total_guesses": total_guesses
     }
