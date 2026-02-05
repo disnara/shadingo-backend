@@ -168,7 +168,8 @@ def mask_username(username):
 
 def get_weekly_period():
     """Get current weekly period (7 days)"""
-    reference_date = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    # Set reference to a recent date so periods align better
+    reference_date = datetime(2026, 2, 5, tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     days_since_ref = (now - reference_date).days
     period_number = days_since_ref // 7
@@ -187,6 +188,18 @@ def get_time_remaining(period_end):
     minutes, seconds = divmod(remainder, 60)
     return {"days": days, "hours": hours, "minutes": minutes, "seconds": seconds}
 
+def get_race_settings():
+    """Get race settings from database or return defaults"""
+    settings = db.race_settings.find_one({"_id": "main"}, {"_id": 0})
+    if not settings:
+        settings = {
+            "status": "running",
+            "blocked_users": [],
+            "custom_users": [],
+            "wager_overrides": {}
+        }
+    return settings
+
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Shadingo Rewards API"}
@@ -194,6 +207,26 @@ def root():
 @api_router.get("/leaderboard")
 def leaderboard():
     period_start, period_end = get_weekly_period()
+    
+    # Get race settings
+    race_settings = get_race_settings()
+    race_status = race_settings.get("status", "running")
+    blocked_users = [u.lower() for u in race_settings.get("blocked_users", [])]
+    custom_users = race_settings.get("custom_users", [])
+    wager_overrides = race_settings.get("wager_overrides", {})
+    
+    # If race is paused or stopped, return status without player data
+    if race_status in ["paused", "stopped"]:
+        return {
+            "players": [],
+            "total_players": 0,
+            "has_data": False,
+            "race_status": race_status,
+            "period_start": period_start.strftime("%Y-%m-%d"),
+            "period_end": period_end.strftime("%Y-%m-%d"),
+            "time_remaining": get_time_remaining(period_end)
+        }
+    
     try:
         params = urllib.parse.urlencode({
             "start_at": period_start.strftime("%Y-%m-%d"),
@@ -203,35 +236,72 @@ def leaderboard():
         url = f"{RAINBET_API_URL}?{params}"
         req = urllib.request.Request(url)
         req.add_header('User-Agent', 'Mozilla/5.0')
+        
+        all_players = []
+        
         with urllib.request.urlopen(req, timeout=30) as response:
             data = json.loads(response.read().decode())
             api_players = data.get('affiliates', []) or []
-            players = []
-            for idx, player_data in enumerate(api_players[:10], start=1):
+            
+            for player_data in api_players:
                 username = player_data.get('username') or player_data.get('name') or ''
-                # Use wagered_amount field from Rainbet API
-                wagered = float(player_data.get('wagered_amount') or player_data.get('wagered') or player_data.get('wager') or 0)
-                players.append({
-                    "rank": idx,
-                    "username": mask_username(username),
+                
+                # Skip blocked users
+                if username.lower() in blocked_users:
+                    continue
+                
+                # Get wager - check for override first
+                if username.lower() in wager_overrides:
+                    wagered = float(wager_overrides[username.lower()])
+                else:
+                    wagered = float(player_data.get('wagered_amount') or player_data.get('wagered') or player_data.get('wager') or 0)
+                
+                all_players.append({
+                    "username": username,
                     "wagered": wagered,
-                    "prize": PRIZES.get(idx),
-                    "avatar": f"https://api.dicebear.com/7.x/avataaars/svg?seed={username}"
+                    "source": "api"
                 })
-            return {
-                "players": players,
-                "total_players": len(players),
-                "has_data": len(players) > 0,
-                "period_start": period_start.strftime("%Y-%m-%d"),
-                "period_end": period_end.strftime("%Y-%m-%d"),
-                "time_remaining": get_time_remaining(period_end)
-            }
+        
+        # Add custom users
+        for custom_user in custom_users:
+            # Check if not blocked
+            if custom_user.get("username", "").lower() not in blocked_users:
+                all_players.append({
+                    "username": custom_user.get("username", ""),
+                    "wagered": float(custom_user.get("wagered", 0)),
+                    "source": "custom"
+                })
+        
+        # Sort by wagered amount descending
+        all_players.sort(key=lambda x: x["wagered"], reverse=True)
+        
+        # Take top 10 and add rankings
+        players = []
+        for idx, player in enumerate(all_players[:10], start=1):
+            players.append({
+                "rank": idx,
+                "username": mask_username(player["username"]),
+                "wagered": player["wagered"],
+                "prize": PRIZES.get(idx),
+                "avatar": f"https://api.dicebear.com/7.x/avataaars/svg?seed={player['username']}"
+            })
+        
+        return {
+            "players": players,
+            "total_players": len(players),
+            "has_data": len(players) > 0,
+            "race_status": "running",
+            "period_start": period_start.strftime("%Y-%m-%d"),
+            "period_end": period_end.strftime("%Y-%m-%d"),
+            "time_remaining": get_time_remaining(period_end)
+        }
     except Exception as e:
         logger.error(f"Leaderboard error: {str(e)}")
         return {
             "players": [],
             "total_players": 0,
             "has_data": False,
+            "race_status": "running",
             "period_start": period_start.strftime("%Y-%m-%d"),
             "period_end": period_end.strftime("%Y-%m-%d"),
             "time_remaining": get_time_remaining(period_end)
@@ -693,6 +763,122 @@ def get_stats(request: Request):
         "total_hunts": total_hunts,
         "total_guesses": total_guesses
     }
+
+# ============= RACE CONTROL =============
+
+@api_router.get("/admin/race")
+def get_race_settings_endpoint(request: Request):
+    """Get race settings (admin only)"""
+    require_admin(request)
+    return get_race_settings()
+
+@api_router.put("/admin/race/status")
+def update_race_status(request: Request, status: str):
+    """Update race status (admin only)"""
+    require_admin(request)
+    
+    if status not in ["running", "paused", "stopped"]:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be: running, paused, or stopped")
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$set": {"status": status}},
+        upsert=True
+    )
+    return {"message": f"Race status updated to {status}"}
+
+@api_router.post("/admin/race/block")
+def block_user(request: Request, username: str):
+    """Block a user from leaderboard (admin only)"""
+    require_admin(request)
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$addToSet": {"blocked_users": username.lower()}},
+        upsert=True
+    )
+    return {"message": f"User {username} blocked from leaderboard"}
+
+@api_router.delete("/admin/race/block/{username}")
+def unblock_user(username: str, request: Request):
+    """Unblock a user from leaderboard (admin only)"""
+    require_admin(request)
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$pull": {"blocked_users": username.lower()}}
+    )
+    return {"message": f"User {username} unblocked"}
+
+@api_router.post("/admin/race/custom-user")
+def add_custom_user(request: Request, username: str, wagered: float):
+    """Add a custom user to leaderboard (admin only)"""
+    require_admin(request)
+    
+    custom_user = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "wagered": wagered
+    }
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$push": {"custom_users": custom_user}},
+        upsert=True
+    )
+    return {"message": f"Custom user {username} added with C${wagered} wagered"}
+
+@api_router.put("/admin/race/custom-user/{user_id}")
+def update_custom_user(user_id: str, request: Request, wagered: float = None, username: str = None):
+    """Update a custom user (admin only)"""
+    require_admin(request)
+    
+    update_fields = {}
+    if wagered is not None:
+        update_fields["custom_users.$.wagered"] = wagered
+    if username is not None:
+        update_fields["custom_users.$.username"] = username
+    
+    if update_fields:
+        db.race_settings.update_one(
+            {"_id": "main", "custom_users.id": user_id},
+            {"$set": update_fields}
+        )
+    return {"message": "Custom user updated"}
+
+@api_router.delete("/admin/race/custom-user/{user_id}")
+def delete_custom_user(user_id: str, request: Request):
+    """Delete a custom user (admin only)"""
+    require_admin(request)
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$pull": {"custom_users": {"id": user_id}}}
+    )
+    return {"message": "Custom user deleted"}
+
+@api_router.post("/admin/race/override")
+def set_wager_override(request: Request, username: str, wagered: float):
+    """Override wager for a user (admin only)"""
+    require_admin(request)
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$set": {f"wager_overrides.{username.lower()}": wagered}},
+        upsert=True
+    )
+    return {"message": f"Wager override set for {username}: C${wagered}"}
+
+@api_router.delete("/admin/race/override/{username}")
+def remove_wager_override(username: str, request: Request):
+    """Remove wager override for a user (admin only)"""
+    require_admin(request)
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$unset": {f"wager_overrides.{username.lower()}": ""}}
+    )
+    return {"message": f"Wager override removed for {username}"}
 
 # Include router
 app.include_router(api_router)
