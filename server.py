@@ -208,7 +208,8 @@ def leaderboard():
             players = []
             for idx, player_data in enumerate(api_players[:10], start=1):
                 username = player_data.get('username') or player_data.get('name') or ''
-                wagered = float(player_data.get('wagered') or player_data.get('wager') or 0)
+                # Use wagered_amount field from Rainbet API
+                wagered = float(player_data.get('wagered_amount') or player_data.get('wagered') or player_data.get('wager') or 0)
                 players.append({
                     "rank": idx,
                     "username": mask_username(username),
