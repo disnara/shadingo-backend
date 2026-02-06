@@ -309,6 +309,17 @@ def leaderboard():
 
 # ============= DISCORD OAUTH =============
 
+@api_router.get("/auth/debug")
+def auth_debug():
+    """Debug endpoint to check auth configuration"""
+    frontend_url = os.environ.get('FRONTEND_URL', 'https://shadingo.com')
+    return {
+        "frontend_url": frontend_url,
+        "discord_client_id": DISCORD_CLIENT_ID[:10] + "..." if DISCORD_CLIENT_ID else "NOT SET",
+        "discord_redirect_uri": DISCORD_REDIRECT_URI,
+        "has_discord_secret": bool(DISCORD_CLIENT_SECRET)
+    }
+
 @api_router.get("/auth/discord/login")
 def discord_login():
     """Redirect to Discord OAuth"""
@@ -324,7 +335,14 @@ def discord_login():
 @api_router.get("/auth/discord/callback")
 def discord_callback(code: str, response: Response):
     """Handle Discord OAuth callback"""
-    frontend_url = os.environ.get('FRONTEND_URL', 'https://shadingo.com')
+    frontend_url = os.environ.get('FRONTEND_URL', '')
+    
+    # Ensure frontend_url is valid
+    if not frontend_url or not frontend_url.startswith('http'):
+        frontend_url = 'https://shadingo.com'
+    
+    # Remove trailing slash if present
+    frontend_url = frontend_url.rstrip('/')
     
     try:
         # Exchange code for token
