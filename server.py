@@ -324,6 +324,8 @@ def discord_login():
 @api_router.get("/auth/discord/callback")
 def discord_callback(code: str, response: Response):
     """Handle Discord OAuth callback"""
+    frontend_url = os.environ.get('FRONTEND_URL', 'https://shadingo.com')
+    
     try:
         # Exchange code for token
         token_response = requests.post(
@@ -343,12 +345,13 @@ def discord_callback(code: str, response: Response):
         
         if token_response.status_code != 200:
             logger.error(f"Discord token error: {token_data}")
-            raise HTTPException(status_code=400, detail=f"Discord auth failed: {token_data.get('error_description', token_data.get('error', 'Unknown error'))}")
+            error_msg = token_data.get('error_description', token_data.get('error', 'Unknown error'))
+            return RedirectResponse(url=f"{frontend_url}/?error=discord_auth_failed&message={urllib.parse.quote(error_msg)}")
         
         access_token = token_data.get("access_token")
         
         if not access_token:
-            raise HTTPException(status_code=400, detail="Failed to get access token")
+            return RedirectResponse(url=f"{frontend_url}/?error=no_access_token")
         
         # Get user info
         user_response = requests.get(
@@ -384,12 +387,12 @@ def discord_callback(code: str, response: Response):
                 "is_admin": is_admin,
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
-            db.users.insert_one(user_data)
+            db.users.insert_one(user_data.copy())  # Use copy to avoid _id mutation
+            # Remove _id if it was added
+            user_data.pop('_id', None)
         
         jwt_token = create_jwt_token(user_data)
         
-        # Use FRONTEND_URL for redirect (separate from backend URL for cross-domain deployments)
-        frontend_url = os.environ.get('FRONTEND_URL', 'https://shadingo.com')
         # Pass token in URL for cross-domain auth (localStorage approach)
         redirect_response = RedirectResponse(url=f"{frontend_url}/?token={jwt_token}")
         return redirect_response
@@ -398,7 +401,7 @@ def discord_callback(code: str, response: Response):
         raise
     except Exception as e:
         logger.error(f"Discord OAuth error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
+        return RedirectResponse(url=f"{frontend_url}/?error=auth_failed&message={urllib.parse.quote(str(e))}")
 
 @api_router.get("/auth/me")
 def get_me(request: Request):
