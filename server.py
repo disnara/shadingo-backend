@@ -389,14 +389,16 @@ def discord_callback(code: str, response: Response):
         jwt_token = create_jwt_token(user_data)
         
         # Use FRONTEND_URL for redirect (separate from backend URL for cross-domain deployments)
-        frontend_url = os.environ.get('FRONTEND_URL', os.environ.get('REACT_APP_BACKEND_URL', 'https://casino-login-2.preview.emergentagent.com').replace('/api', ''))
+        frontend_url = os.environ.get('FRONTEND_URL', 'https://shadingo.com')
         # Pass token in URL for cross-domain auth (localStorage approach)
         redirect_response = RedirectResponse(url=f"{frontend_url}/?token={jwt_token}")
         return redirect_response
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Discord OAuth error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Authentication failed")
+        raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
 
 @api_router.get("/auth/me")
 def get_me(request: Request):
