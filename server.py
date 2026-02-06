@@ -655,18 +655,34 @@ def end_competition(competition_id: str, req: EndCompetitionRequest, request: Re
     winner = None
     closest_diff = float('inf')
     
+    # Calculate all differences and find winner
+    all_results = []
     for guess in guesses:
         diff = abs(guess["guess_amount"] - req.final_balance)
+        all_results.append({
+            "discord_username": guess.get("discord_username", guess.get("kick_username", "Unknown")),
+            "user_discord_id": guess["user_discord_id"],
+            "guess_amount": guess["guess_amount"],
+            "difference": diff
+        })
         if diff < closest_diff:
             closest_diff = diff
             winner = guess
+    
+    # Sort results by difference (closest first)
+    all_results.sort(key=lambda x: x["difference"])
+    
+    winner_username = winner.get("discord_username", winner.get("kick_username", "Unknown")) if winner else None
     
     update_data = {
         "status": "ended",
         "ended_at": datetime.now(timezone.utc).isoformat(),
         "final_balance": req.final_balance,
         "winner_discord_id": winner["user_discord_id"] if winner else None,
-        "winner_guess": winner["guess_amount"] if winner else None
+        "winner_username": winner_username,
+        "winner_guess": winner["guess_amount"] if winner else None,
+        "winner_difference": closest_diff if winner else None,
+        "total_guesses": len(guesses)
     }
     
     db.guessing_competitions.update_one(
@@ -674,7 +690,71 @@ def end_competition(competition_id: str, req: EndCompetitionRequest, request: Re
         {"$set": update_data}
     )
     
-    return {"message": "Competition ended", "winner": winner, "final_balance": req.final_balance}
+    return {
+        "message": "Competition ended",
+        "winner": {
+            "username": winner_username,
+            "guess": winner["guess_amount"] if winner else None,
+            "difference": closest_diff if winner else None
+        } if winner else None,
+        "final_balance": req.final_balance,
+        "total_guesses": len(guesses),
+        "all_results": all_results
+    }
+
+@api_router.get("/hunts/{hunt_id}/calculated-balance")
+def get_hunt_calculated_balance(hunt_id: str):
+    """Get hunt with calculated end balance"""
+    hunt = db.bonus_hunts.find_one({"hunt_id": hunt_id}, {"_id": 0})
+    if not hunt:
+        raise HTTPException(status_code=404, detail="Hunt not found")
+    
+    start_balance = hunt.get("start_balance", 0)
+    slots = hunt.get("slots", [])
+    total_wins = sum(slot.get("win", 0) for slot in slots)
+    calculated_end_balance = start_balance + total_wins
+    
+    return {
+        **hunt,
+        "total_wins": total_wins,
+        "calculated_end_balance": calculated_end_balance
+    }
+
+@api_router.get("/competitions/{competition_id}/results")
+def get_competition_results(competition_id: str):
+    """Get competition results with all guesses"""
+    competition = db.guessing_competitions.find_one({"competition_id": competition_id}, {"_id": 0})
+    if not competition:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    hunt_id = competition.get("hunt_id")
+    guesses = list(db.guesses.find({"hunt_id": hunt_id}, {"_id": 0}))
+    
+    final_balance = competition.get("final_balance")
+    
+    # Calculate differences if competition ended
+    results = []
+    for guess in guesses:
+        result = {
+            "discord_username": guess.get("discord_username", guess.get("kick_username", "Unknown")),
+            "user_discord_id": guess["user_discord_id"],
+            "guess_amount": guess["guess_amount"],
+            "timestamp": guess.get("timestamp")
+        }
+        if final_balance:
+            result["difference"] = abs(guess["guess_amount"] - final_balance)
+        results.append(result)
+    
+    # Sort by difference if ended, otherwise by timestamp
+    if final_balance:
+        results.sort(key=lambda x: x.get("difference", 0))
+    else:
+        results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    return {
+        **competition,
+        "guesses": results
+    }
 
 class SubmitGuessRequest(BaseModel):
     guess_amount: float
