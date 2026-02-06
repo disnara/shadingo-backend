@@ -338,6 +338,13 @@ def discord_callback(code: str, response: Response):
             headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
         token_data = token_response.json()
+        
+        logger.info(f"Discord token response status: {token_response.status_code}")
+        
+        if token_response.status_code != 200:
+            logger.error(f"Discord token error: {token_data}")
+            raise HTTPException(status_code=400, detail=f"Discord auth failed: {token_data.get('error_description', token_data.get('error', 'Unknown error'))}")
+        
         access_token = token_data.get("access_token")
         
         if not access_token:
