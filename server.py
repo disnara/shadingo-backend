@@ -335,7 +335,7 @@ def discord_login():
 @api_router.get("/auth/discord/callback")
 def discord_callback(code: str, response: Response):
     """Handle Discord OAuth callback"""
-    frontend_url = os.environ.get('FRONTEND_URL', '')
+    frontend_url = os.environ.get('FRONTEND_URL', '').strip()
     
     # Ensure frontend_url is valid
     if not frontend_url or not frontend_url.startswith('http'):
@@ -491,7 +491,7 @@ def kick_login(request: Request, auth_token: str = None):
 @api_router.get("/auth/kick/callback")
 def kick_callback(code: str = None, state: str = None, error: str = None):
     """Handle Kick OAuth callback"""
-    frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'https://casino-login-2.preview.emergentagent.com').replace('/api', '')
+    frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'https://gamerewards-28.preview.emergentagent.com').replace('/api', '')
     
     if error:
         logger.error(f"Kick OAuth error from provider: {error}")
@@ -605,6 +605,28 @@ def update_hunt(hunt_id: str, hunt_update: Dict[str, Any], request: Request):
     """Update bonus hunt (admin only)"""
     require_admin(request)
     
+    # Auto-calculate best_win and run_avg_x if slots are provided
+    if "slots" in hunt_update:
+        slots = hunt_update.get("slots", [])
+        wins = [slot.get("win", 0) for slot in slots if slot.get("win", 0) > 0]
+        best_win = max(wins) if wins else 0.0
+        total_wins = sum(wins)
+        
+        # Get start_balance from update or existing hunt
+        start_balance = hunt_update.get("start_balance")
+        if start_balance is None:
+            existing_hunt = db.bonus_hunts.find_one({"hunt_id": hunt_id}, {"_id": 0})
+            if existing_hunt:
+                start_balance = existing_hunt.get("start_balance", 0)
+            else:
+                start_balance = 0
+        
+        # Calculate run_avg_x = total_wins / start_balance
+        run_avg_x = round(total_wins / start_balance, 2) if start_balance > 0 else 0.0
+        
+        hunt_update["best_win"] = best_win
+        hunt_update["run_avg_x"] = run_avg_x
+    
     result = db.bonus_hunts.update_one(
         {"hunt_id": hunt_id},
         {"$set": hunt_update}
@@ -640,6 +662,46 @@ def get_active_competition():
     """Get active guessing competition"""
     competition = db.guessing_competitions.find_one({"status": "active"}, {"_id": 0})
     return competition
+
+@api_router.get("/competitions/latest-ended")
+def get_latest_ended_competition():
+    """Get the most recently ended competition with results"""
+    competition = db.guessing_competitions.find_one(
+        {"status": "ended"},
+        {"_id": 0},
+        sort=[("ended_at", -1)]
+    )
+    
+    if not competition:
+        return None
+    
+    # Get all guesses for this competition's hunt
+    hunt_id = competition.get("hunt_id")
+    guesses = list(db.guesses.find({"hunt_id": hunt_id}, {"_id": 0}))
+    
+    final_balance = competition.get("final_balance")
+    
+    # Calculate differences and sort by closest
+    results = []
+    for guess in guesses:
+        result = {
+            "discord_username": guess.get("discord_username", guess.get("kick_username", "Unknown")),
+            "user_discord_id": guess["user_discord_id"],
+            "guess_amount": guess["guess_amount"],
+            "timestamp": guess.get("timestamp")
+        }
+        if final_balance:
+            result["difference"] = abs(guess["guess_amount"] - final_balance)
+        results.append(result)
+    
+    # Sort by difference (closest first)
+    if final_balance:
+        results.sort(key=lambda x: x.get("difference", 0))
+    
+    return {
+        **competition,
+        "guesses": results
+    }
 
 class StartCompetitionRequest(BaseModel):
     hunt_id: str
