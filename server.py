@@ -659,8 +659,8 @@ def get_competitions():
 
 @api_router.get("/competitions/active")
 def get_active_competition():
-    """Get active guessing competition"""
-    competition = db.guessing_competitions.find_one({"status": "active"}, {"_id": 0})
+    """Get active or paused guessing competition"""
+    competition = db.guessing_competitions.find_one({"status": {"$in": ["active", "paused"]}}, {"_id": 0})
     return competition
 
 @api_router.get("/competitions/latest-ended")
@@ -728,6 +728,42 @@ def start_competition(req: StartCompetitionRequest, request: Request):
 
 class EndCompetitionRequest(BaseModel):
     final_balance: float
+
+@api_router.post("/competitions/{competition_id}/pause")
+def pause_competition(competition_id: str, request: Request):
+    """Pause a guessing competition (admin only)"""
+    require_admin(request)
+    
+    competition = db.guessing_competitions.find_one({"competition_id": competition_id})
+    if not competition:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    if competition["status"] not in ["active"]:
+        raise HTTPException(status_code=400, detail="Can only pause active competitions")
+    
+    db.guessing_competitions.update_one(
+        {"competition_id": competition_id},
+        {"$set": {"status": "paused"}}
+    )
+    return {"message": "Competition paused"}
+
+@api_router.post("/competitions/{competition_id}/resume")
+def resume_competition(competition_id: str, request: Request):
+    """Resume a paused guessing competition (admin only)"""
+    require_admin(request)
+    
+    competition = db.guessing_competitions.find_one({"competition_id": competition_id})
+    if not competition:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    if competition["status"] != "paused":
+        raise HTTPException(status_code=400, detail="Can only resume paused competitions")
+    
+    db.guessing_competitions.update_one(
+        {"competition_id": competition_id},
+        {"$set": {"status": "active"}}
+    )
+    return {"message": "Competition resumed"}
 
 @api_router.post("/competitions/{competition_id}/end")
 def end_competition(competition_id: str, req: EndCompetitionRequest, request: Request):
@@ -856,8 +892,12 @@ def submit_guess(req: SubmitGuessRequest, request: Request):
     """Submit a guess (requires Discord login only)"""
     user = require_auth(request)
     
-    competition = db.guessing_competitions.find_one({"status": "active"})
+    competition = db.guessing_competitions.find_one({"status": {"$in": ["active"]}})
     if not competition:
+        # Check if paused
+        paused = db.guessing_competitions.find_one({"status": "paused"})
+        if paused:
+            raise HTTPException(status_code=400, detail="Guessing is currently paused")
         raise HTTPException(status_code=400, detail="No active competition")
     
     existing_guess = db.guesses.find_one({
