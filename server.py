@@ -177,10 +177,26 @@ def get_weekly_period():
     period_end = period_start + timedelta(days=6)
     return period_start, period_end
 
-def get_time_remaining(period_end):
+def get_time_remaining(period_end, race_settings=None):
     now = datetime.now(timezone.utc)
     end_time = period_end + timedelta(days=1)
+    
+    # Add accumulated paused time to the deadline
+    total_paused = 0
+    if race_settings:
+        total_paused = race_settings.get("total_paused_seconds", 0)
+        # If currently paused, add ongoing pause duration too
+        paused_at = race_settings.get("paused_at")
+        if paused_at and race_settings.get("status") in ["paused", "stopped"]:
+            if isinstance(paused_at, str):
+                paused_at = datetime.fromisoformat(paused_at)
+            if paused_at.tzinfo is None:
+                paused_at = paused_at.replace(tzinfo=timezone.utc)
+            total_paused += (now - paused_at).total_seconds()
+    
+    end_time = end_time + timedelta(seconds=total_paused)
     remaining = end_time - now
+    
     if remaining.total_seconds() <= 0:
         return {"days": 0, "hours": 0, "minutes": 0, "seconds": 0}
     days = remaining.days
@@ -224,7 +240,7 @@ def leaderboard():
             "race_status": race_status,
             "period_start": period_start.strftime("%Y-%m-%d"),
             "period_end": period_end.strftime("%Y-%m-%d"),
-            "time_remaining": get_time_remaining(period_end)
+            "time_remaining": get_time_remaining(period_end, race_settings)
         }
     
     try:
@@ -293,7 +309,7 @@ def leaderboard():
             "race_status": "running",
             "period_start": period_start.strftime("%Y-%m-%d"),
             "period_end": period_end.strftime("%Y-%m-%d"),
-            "time_remaining": get_time_remaining(period_end)
+            "time_remaining": get_time_remaining(period_end, race_settings)
         }
     except Exception as e:
         logger.error(f"Leaderboard error: {str(e)}")
@@ -304,7 +320,7 @@ def leaderboard():
             "race_status": "running",
             "period_start": period_start.strftime("%Y-%m-%d"),
             "period_end": period_end.strftime("%Y-%m-%d"),
-            "time_remaining": get_time_remaining(period_end)
+            "time_remaining": get_time_remaining(period_end, race_settings)
         }
 
 # ============= DISCORD OAUTH =============
@@ -992,9 +1008,32 @@ def update_race_status(request: Request, status: str):
     if status not in ["running", "paused", "stopped"]:
         raise HTTPException(status_code=400, detail="Invalid status. Must be: running, paused, or stopped")
     
+    now = datetime.now(timezone.utc)
+    current_settings = get_race_settings()
+    current_status = current_settings.get("status", "running")
+    
+    update_fields = {"status": status}
+    
+    # Pausing: record when we paused
+    if status in ["paused", "stopped"] and current_status == "running":
+        update_fields["paused_at"] = now.isoformat()
+    
+    # Resuming: accumulate paused duration
+    if status == "running" and current_status in ["paused", "stopped"]:
+        paused_at = current_settings.get("paused_at")
+        if paused_at:
+            if isinstance(paused_at, str):
+                paused_at = datetime.fromisoformat(paused_at)
+            if paused_at.tzinfo is None:
+                paused_at = paused_at.replace(tzinfo=timezone.utc)
+            paused_duration = (now - paused_at).total_seconds()
+            prev_total = current_settings.get("total_paused_seconds", 0)
+            update_fields["total_paused_seconds"] = prev_total + paused_duration
+            update_fields["paused_at"] = None
+    
     db.race_settings.update_one(
         {"_id": "main"},
-        {"$set": {"status": status}},
+        {"$set": update_fields},
         upsert=True
     )
     return {"message": f"Race status updated to {status}"}
