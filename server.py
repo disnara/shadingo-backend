@@ -33,11 +33,12 @@ DISCORD_REDIRECT_URI = os.environ.get('DISCORD_REDIRECT_URI', '')
 KICK_CLIENT_ID = os.environ.get('KICK_CLIENT_ID', '')
 KICK_CLIENT_SECRET = os.environ.get('KICK_CLIENT_SECRET', '')
 KICK_REDIRECT_URI = os.environ.get('KICK_REDIRECT_URI', '')
-ADMIN_IDS = os.environ.get('ADMIN_DISCORD_IDS', '').split(',')
-JWT_SECRET = os.environ['JWT_SECRET']
-RAINBET_API_KEY = os.environ['RAINBET_API_KEY']
-RAINBET_API_URL = "https://services.rainbet.com/v1/external/affiliates"
-PRIZES = {1: 125, 2: 55, 3: 35, 4: 20, 5: 15}
+ADMIN_IDS = os.environ.get('ADMIN_DISCORD_IDS', '1459292713911320800').split(',')
+JWT_SECRET = os.environ.get('JWT_SECRET', 'default_jwt_secret_change_in_production')
+GAMBULL_API_KEY = os.environ.get('GAMBULL_API_KEY', 'sk_324c64cdae5347d288608745bb58487c')
+GAMBULL_API_URL = "https://api.gambulls.com/api/public/streamer/leaderboard"
+# Updated prize structure: $250 total
+PRIZES = {1: 150, 2: 50, 3: 25, 4: 10, 5: 5, 6: 5, 7: 5}
 
 # FastAPI app
 app = FastAPI(title="Shadingo Rewards API")
@@ -244,39 +245,47 @@ def leaderboard():
         }
     
     try:
-        params = urllib.parse.urlencode({
-            "start_at": period_start.strftime("%Y-%m-%d"),
-            "end_at": period_end.strftime("%Y-%m-%d"),
-            "key": RAINBET_API_KEY
-        })
-        url = f"{RAINBET_API_URL}?{params}"
+        # GamBull API - weekly leaderboard
+        url = f"{GAMBULL_API_URL}?type=weekly&limit=50"
         req = urllib.request.Request(url)
+        req.add_header('x-streamer-api-key', GAMBULL_API_KEY)
         req.add_header('User-Agent', 'Mozilla/5.0')
         
         all_players = []
         
         with urllib.request.urlopen(req, timeout=30) as response:
             data = json.loads(response.read().decode())
-            api_players = data.get('affiliates', []) or []
             
-            for player_data in api_players:
-                username = player_data.get('username') or player_data.get('name') or ''
+            if data.get('success'):
+                response_obj = data.get('responseObject', {})
+                rankings = response_obj.get('rankings', [])
                 
-                # Skip blocked users
-                if username.lower() in blocked_users:
-                    continue
-                
-                # Get wager - check for override first
-                if username.lower() in wager_overrides:
-                    wagered = float(wager_overrides[username.lower()])
-                else:
-                    wagered = float(player_data.get('wagered_amount') or player_data.get('wagered') or player_data.get('wager') or 0)
-                
-                all_players.append({
-                    "username": username,
-                    "wagered": wagered,
-                    "source": "api"
-                })
+                for player_data in rankings:
+                    user_info = player_data.get('user', {})
+                    username = user_info.get('name') or 'Anonymous'
+                    is_anonymous = user_info.get('isAnonymous', False)
+                    avatar_url = user_info.get('imageUrl')
+                    
+                    # Handle anonymous users
+                    if is_anonymous or not username:
+                        username = f"Anonymous_{player_data.get('rank', 0)}"
+                    
+                    # Skip blocked users
+                    if username.lower() in blocked_users:
+                        continue
+                    
+                    # Get wager - check for override first
+                    if username.lower() in wager_overrides:
+                        wagered = float(wager_overrides[username.lower()])
+                    else:
+                        wagered = float(player_data.get('wagerAmount', 0))
+                    
+                    all_players.append({
+                        "username": username,
+                        "wagered": wagered,
+                        "avatar": avatar_url,
+                        "source": "api"
+                    })
         
         # Add custom users
         for custom_user in custom_users:
@@ -285,6 +294,7 @@ def leaderboard():
                 all_players.append({
                     "username": custom_user.get("username", ""),
                     "wagered": float(custom_user.get("wagered", 0)),
+                    "avatar": None,
                     "source": "custom"
                 })
         
@@ -294,12 +304,13 @@ def leaderboard():
         # Take top 10 and add rankings
         players = []
         for idx, player in enumerate(all_players[:10], start=1):
+            avatar = player.get("avatar") or f"https://api.dicebear.com/7.x/avataaars/svg?seed={player['username']}"
             players.append({
                 "rank": idx,
                 "username": mask_username(player["username"]),
                 "wagered": player["wagered"],
                 "prize": PRIZES.get(idx),
-                "avatar": f"https://api.dicebear.com/7.x/avataaars/svg?seed={player['username']}"
+                "avatar": avatar
             })
         
         return {
