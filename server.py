@@ -413,14 +413,17 @@ def discord_callback(code: str, response: Response):
         
         existing_user = db.users.find_one({"discord_id": discord_id}, {"_id": 0})
         
+        # Always check admin status on every login
+        is_admin = discord_id in ADMIN_IDS
+        
         if existing_user:
             user_data = existing_user
+            user_data["is_admin"] = is_admin  # Update admin status
             db.users.update_one(
                 {"discord_id": discord_id},
-                {"$set": {"avatar": avatar_url, "discord_username": username}}
+                {"$set": {"avatar": avatar_url, "discord_username": username, "is_admin": is_admin}}
             )
         else:
-            is_admin = discord_id in ADMIN_IDS
             user_data = {
                 "user_id": str(uuid.uuid4()),
                 "discord_id": discord_id,
