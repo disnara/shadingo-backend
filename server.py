@@ -33,7 +33,7 @@ DISCORD_REDIRECT_URI = os.environ.get('DISCORD_REDIRECT_URI', '')
 KICK_CLIENT_ID = os.environ.get('KICK_CLIENT_ID', '')
 KICK_CLIENT_SECRET = os.environ.get('KICK_CLIENT_SECRET', '')
 KICK_REDIRECT_URI = os.environ.get('KICK_REDIRECT_URI', '')
-ADMIN_IDS = os.environ.get('ADMIN_DISCORD_IDS', '1459292713911320800').split(',')
+ADMIN_IDS = [id.strip() for id in os.environ.get('ADMIN_DISCORD_IDS', '1459292713911320800').split(',')]
 JWT_SECRET = os.environ.get('JWT_SECRET', 'default_jwt_secret_change_in_production')
 GAMBULL_API_KEY = os.environ.get('GAMBULL_API_KEY', 'sk_324c64cdae5347d288608745bb58487c')
 GAMBULL_API_URL = "https://api.gambulls.com/api/public/streamer/leaderboard"
@@ -413,8 +413,11 @@ def discord_callback(code: str, response: Response):
         
         existing_user = db.users.find_one({"discord_id": discord_id}, {"_id": 0})
         
-        # Always check admin status on every login
-        is_admin = discord_id in ADMIN_IDS
+        # Always check admin status on every login (compare as strings)
+        is_admin = str(discord_id) in ADMIN_IDS
+        
+        # Debug logging
+        logger.info(f"Discord ID: {discord_id}, Type: {type(discord_id)}, ADMIN_IDS: {ADMIN_IDS}, is_admin: {is_admin}")
         
         if existing_user:
             user_data = existing_user
