@@ -1,8 +1,0 @@
-MONGO_URL="mongodb://localhost:27017"
-DB_NAME="shadingo_database"
-CORS_ORIGINS="*"
-ADMIN_DISCORD_IDS="1459292713911320800"
-JWT_SECRET="shadingo_super_secret_jwt_key_2026"
-GAMBULL_API_KEY="sk_324c64cdae5347d288608745bb58487c"
-FRONTEND_URL="https://source-reveal-3.preview.emergentagent.com"
-DISCORD_REDIRECT_URI="https://source-reveal-3.preview.emergentagent.com/api/auth/discord/callback"
