@@ -460,7 +460,24 @@ def get_me(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Re-check admin status every time (in case env var changed)
+    is_admin = str(user.get("discord_id", "")) in ADMIN_IDS
+    user["is_admin"] = is_admin
+    logger.info(f"Auth check - Discord ID: {user.get('discord_id')}, ADMIN_IDS: {ADMIN_IDS}, is_admin: {is_admin}")
     return user
+
+@api_router.get("/debug/admin-check/{discord_id}")
+def debug_admin_check(discord_id: str):
+    """Debug endpoint to check admin status"""
+    is_admin = discord_id in ADMIN_IDS
+    return {
+        "discord_id": discord_id,
+        "admin_ids": ADMIN_IDS,
+        "is_admin": is_admin,
+        "type_discord_id": type(discord_id).__name__,
+        "types_admin_ids": [type(x).__name__ for x in ADMIN_IDS]
+    }
 
 @api_router.post("/auth/logout")
 def logout(response: Response):
