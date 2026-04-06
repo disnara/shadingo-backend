@@ -1072,6 +1072,25 @@ def update_race_status(request: Request, status: str):
     )
     return {"message": f"Race status updated to {status}"}
 
+class PeriodUpdate(BaseModel):
+    period_start: str
+    period_end: str
+
+@api_router.put("/admin/race/period")
+def update_race_period(request: Request, period: PeriodUpdate):
+    """Update leaderboard period dates (admin only)"""
+    require_admin(request)
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$set": {
+            "period_start": period.period_start,
+            "period_end": period.period_end
+        }},
+        upsert=True
+    )
+    return {"message": f"Period updated: {period.period_start} to {period.period_end}"}
+
 @api_router.post("/admin/race/block")
 def block_user(request: Request, username: str):
     """Block a user from leaderboard (admin only)"""
