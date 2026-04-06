@@ -371,16 +371,27 @@ def discord_callback(code: str, response: Response):
     # Remove trailing slash if present
     frontend_url = frontend_url.rstrip('/')
     
+    # Re-read env vars in case of serverless cold start
+    client_id = os.environ.get('DISCORD_CLIENT_ID', '')
+    client_secret = os.environ.get('DISCORD_CLIENT_SECRET', '')
+    redirect_uri = os.environ.get('DISCORD_REDIRECT_URI', '')
+    
+    logger.info(f"Callback - client_id present: {bool(client_id)}, secret present: {bool(client_secret)}, redirect: {redirect_uri}")
+    
+    if not client_id or not client_secret:
+        logger.error(f"Missing Discord credentials in callback! client_id: {bool(client_id)}, secret: {bool(client_secret)}")
+        return RedirectResponse(url=f"{frontend_url}/?error=server_config_error&message=Discord+credentials+not+configured")
+    
     try:
         # Exchange code for token
         token_response = requests.post(
             "https://discord.com/api/oauth2/token",
             data={
-                "client_id": DISCORD_CLIENT_ID,
-                "client_secret": DISCORD_CLIENT_SECRET,
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "grant_type": "authorization_code",
                 "code": code,
-                "redirect_uri": DISCORD_REDIRECT_URI,
+                "redirect_uri": redirect_uri,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
