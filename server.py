@@ -227,8 +227,15 @@ def get_race_settings():
             "status": "running",
             "blocked_users": [],
             "custom_users": [],
-            "wager_overrides": {}
+            "wager_overrides": {},
+            "period_start": "",
+            "period_end": ""
         }
+    # Ensure period fields exist
+    if "period_start" not in settings:
+        settings["period_start"] = ""
+    if "period_end" not in settings:
+        settings["period_end"] = ""
     return settings
 
 @app.get("/")
