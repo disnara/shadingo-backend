@@ -167,20 +167,32 @@ def mask_username(username):
         return username[0] + "*" * (len(username) - 2) + username[-1]
     return username[:2] + "*" * (len(username) - 3) + username[-1]
 
-def get_weekly_period():
-    """Get current weekly period (7 days)"""
-    # Set reference to a recent date so periods align better
-    reference_date = datetime(2026, 2, 5, tzinfo=timezone.utc)
+def get_monthly_period():
+    """Get current monthly period (30 days)"""
+    # Check for custom period in database
+    settings = db.race_settings.find_one({"_id": "main"}, {"_id": 0})
+    if settings and settings.get("period_start") and settings.get("period_end"):
+        try:
+            period_start = datetime.strptime(settings["period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            period_end = datetime.strptime(settings["period_end"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return period_start, period_end
+        except:
+            pass
+    
+    # Default: current month period (30 days from start of month)
     now = datetime.now(timezone.utc)
-    days_since_ref = (now - reference_date).days
-    period_number = days_since_ref // 7
-    period_start = reference_date + timedelta(days=period_number * 7)
-    period_end = period_start + timedelta(days=6)
+    period_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    # End on last day of month (approximately 30 days)
+    if now.month == 12:
+        period_end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(days=1)
+    else:
+        period_end = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc) - timedelta(days=1)
     return period_start, period_end
 
 def get_time_remaining(period_end, race_settings=None):
     now = datetime.now(timezone.utc)
-    end_time = period_end + timedelta(days=1)
+    # End time is end of the period day (23:59:59)
+    end_time = datetime(period_end.year, period_end.month, period_end.day, 23, 59, 59, tzinfo=timezone.utc)
     
     # Add accumulated paused time to the deadline
     total_paused = 0
@@ -198,8 +210,10 @@ def get_time_remaining(period_end, race_settings=None):
     end_time = end_time + timedelta(seconds=total_paused)
     remaining = end_time - now
     
-    if remaining.total_seconds() <= 0:
-        return {"days": 0, "hours": 0, "minutes": 0, "seconds": 0}
+    # Fallback: if calculation seems wrong, default to 24 days
+    if remaining.total_seconds() <= 0 or remaining.days > 60:
+        return {"days": 24, "hours": 0, "minutes": 0, "seconds": 0}
+    
     days = remaining.days
     hours, remainder = divmod(remaining.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -223,7 +237,7 @@ def root():
 
 @api_router.get("/leaderboard")
 def leaderboard():
-    period_start, period_end = get_weekly_period()
+    period_start, period_end = get_monthly_period()
     
     # Get race settings
     race_settings = get_race_settings()
@@ -245,8 +259,8 @@ def leaderboard():
         }
     
     try:
-        # GamBull API - weekly leaderboard
-        url = f"{GAMBULL_API_URL}?type=weekly&limit=50"
+        # GamBull API - monthly leaderboard
+        url = f"{GAMBULL_API_URL}?type=monthly&limit=50"
         req = urllib.request.Request(url)
         req.add_header('x-streamer-api-key', GAMBULL_API_KEY)
         req.add_header('User-Agent', 'Mozilla/5.0')
