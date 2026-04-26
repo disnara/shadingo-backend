@@ -191,14 +191,37 @@ def get_monthly_period():
 
 def get_time_remaining(period_end, race_settings=None):
     now = datetime.now(timezone.utc)
-    # End time is end of the period day (23:59:59)
+    
+    # Check for custom timer deadline first
+    if race_settings and race_settings.get("timer_deadline"):
+        try:
+            deadline_str = race_settings["timer_deadline"]
+            if isinstance(deadline_str, str):
+                deadline = datetime.fromisoformat(deadline_str.replace('Z', '+00:00'))
+            else:
+                deadline = deadline_str
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            
+            remaining = deadline - now
+            
+            if remaining.total_seconds() <= 0:
+                return {"days": 0, "hours": 0, "minutes": 0, "seconds": 0}
+            
+            days = remaining.days
+            hours, remainder = divmod(remaining.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return {"days": days, "hours": hours, "minutes": minutes, "seconds": seconds}
+        except Exception as e:
+            logger.error(f"Error parsing timer deadline: {e}")
+    
+    # Fallback to period_end calculation
     end_time = datetime(period_end.year, period_end.month, period_end.day, 23, 59, 59, tzinfo=timezone.utc)
     
     # Add accumulated paused time to the deadline
     total_paused = 0
     if race_settings:
         total_paused = race_settings.get("total_paused_seconds", 0)
-        # If currently paused, add ongoing pause duration too
         paused_at = race_settings.get("paused_at")
         if paused_at and race_settings.get("status") in ["paused", "stopped"]:
             if isinstance(paused_at, str):
@@ -1107,6 +1130,33 @@ def update_race_status(request: Request, status: str):
 class PeriodUpdate(BaseModel):
     period_start: str
     period_end: str
+
+class TimerUpdate(BaseModel):
+    total_seconds: int
+
+@api_router.put("/admin/race/timer")
+def update_race_timer(request: Request, timer: TimerUpdate):
+    """Update leaderboard timer directly (admin only)"""
+    require_admin(request)
+    
+    # Calculate deadline from now + total_seconds
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=timer.total_seconds)
+    
+    db.race_settings.update_one(
+        {"_id": "main"},
+        {"$set": {
+            "timer_deadline": deadline.isoformat(),
+            "total_paused_seconds": 0  # Reset paused time when setting new timer
+        }},
+        upsert=True
+    )
+    
+    days = timer.total_seconds // 86400
+    hours = (timer.total_seconds % 86400) // 3600
+    minutes = (timer.total_seconds % 3600) // 60
+    seconds = timer.total_seconds % 60
+    
+    return {"message": f"Timer set to {days}d {hours}h {minutes}m {seconds}s"}
 
 @api_router.put("/admin/race/period")
 def update_race_period(request: Request, period: PeriodUpdate):
